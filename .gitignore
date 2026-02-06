@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# 本地生成的报告文件
+report-zh.html
+
+# 临时文件
+*.tmp
+*.log
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Firecrawl 配置
+.firecrawl/
