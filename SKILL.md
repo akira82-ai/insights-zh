@@ -1,184 +1,214 @@
 ---
 name: insights-zh
-description: Check for existing insights report and translate it to Chinese
-disable-model-invocation: true
-allowed-tools: TaskCreate, TaskUpdate, TaskList, TaskGet, Bash, Read, Write
+description: |
+  翻译或生成 Claude Code 的 insights 中文报告。当用户说以下任一内容时自动触发：
+  - "翻译 insights"、"翻译报告"、"中文版 insights"
+  - "/insights-zh"、"生成中文报告"、"insights 中文翻译"
+  - "把 insights 报告翻译成中文"、"生成中文的 insights HTML"
+  - "中文 insights"、"生成 insights 中文版"、"我的 insights"
+  - 提到将 ~/.claude/usage-data/report.html 翻译为中文
+
+  功能说明：
+  - 智能判断：如果 report.html 不存在则提示用户先运行 /insights
+  - 自动检查报告年龄（3 天内为新鲜，过期则提示用户）
+  - 使用 TSV 格式提取文本，避免 JSON 转义问题
+  - 使用 Task 工具启动独立子代理翻译，避免嵌套会话问题
+  - 保留所有 HTML 标签、CSS 样式、JavaScript 代码
+  - 只翻译用户可见的文本内容
+  - 生成 report-zh.html 并在浏览器中打开
+disable-model-invocation: false
+allowed-tools: Bash, Read, Write, Task, Skill
 ---
 
 # Insights 中文报告生成器
 
-本技能检查现有的 insights HTML 报告并将其翻译为中文。
+生成或翻译 Claude Code 的 insights HTML 报告为中文。
 
-## 工作流程
+## 核心优势
 
-当用户调用 `/insights-zh` 时，你将创建 7 个独立的 task 并按依赖关系顺序执行。
+- ✅ **避免嵌套会话问题**：使用 Task 工具而非 subprocess 调用 claude 命令
+- ✅ **避免 JSON 转义问题**：使用 TSV 格式而非 JSON 存储翻译
+- ✅ **修复索引不一致问题**：统一使用 BeautifulSoup，通过原文匹配而非索引
+- ✅ **简化流程**：单一脚本完成提取、合并流程
+- ✅ **自动清理**：翻译完成后自动删除临时 TSV 文件
+- ✅ **自动检查**：检测报告年龄，过期时提示用户
 
-## 步骤 1: 创建任务
+## 执行流程
 
-首先，使用 TaskCreate 工具创建以下 7 个任务：
+### 步骤 0: 智能判断与报告检查
 
-### 任务 1: 检查报告文件
-- **subject**: "Check for insights HTML report"
-- **description**: "检查 ~/.claude/usage-data/ 目录是否存在 report.html 文件。如果存在则继续，如果不存在则向用户报告错误并终止。"
-- **activeForm**: "Checking for HTML report"
+1. **检查源文件**：
+   ```bash
+   ls -lh ~/.claude/usage-data/report.html
+   ```
 
-### 任务 2: 分析 HTML 文本块
-- **subject**: "Analyze HTML text blocks"
-- **description**: "调用 analyze_html.py 脚本分析 ~/.claude/usage-data/report.html 文件，计算文本块数量，并将文本块拆分为 8-10 个部分。生成分析结果到 /tmp/insights-analysis.json"
-- **activeForm**: "Analyzing HTML text blocks"
-- **addBlockedBy**: ["1"]
+2. **检查报告年龄**：
+   - 自动检查报告是否在 3 天内生成
+   - **如果报告过期**：提示用户运行 `/insights` 生成新报告，**结束技能**
 
-### 任务 3: 创建翻译子任务
-- **subject**: "Create translation subtasks"
-- **description**: "根据 /tmp/insights-analysis.json 的分析结果，创建 8-10 个翻译子任务。每个子任务负责翻译一部分文本块。更新子任务列表并准备翻译工作。"
-- **activeForm**: "Creating translation subtasks"
-- **addBlockedBy**: ["2"]
+3. **判断用户意图**：
+   - 如果用户说"生成"、"新建"或文件不存在 → 提示运行 `/insights`
+   - 如果用户说"翻译"、"转换"且文件存在且新鲜 → 继续翻译步骤
 
-### 任务 4: 执行翻译
-- **subject**: "Translate all text blocks"
-- **description**: "串行执行所有翻译子任务。对于每个子任务：1) 读取对应的文本块 2) 使用大模型将英文翻译为中文 3) 保存翻译结果到 /tmp/insights-analysis.json 中的对应位置。翻译时保留所有 HTML 标签、CSS 样式、JavaScript 代码和属性，只翻译用户可见的文本内容。"
-- **activeForm**: "Translating text blocks"
-- **addBlockedBy**: ["3"]
+### 步骤 1: 提取文本块
 
-### 任务 5: 整合翻译结果
-- **subject**: "Merge translations into HTML"
-- **description**: "调用 merge_translations.py 脚本，将原始 HTML 文件 ~/.claude/usage-data/report.html 和翻译结果 /tmp/insights-analysis.json 合并，生成完整的中文 HTML 文件 /tmp/report-zh.html。保持原有的布局、颜色、风格等所有视觉元素。"
-- **activeForm**: "Merging translations into HTML"
-- **addBlockedBy**: ["4"]
-
-### 任务 6: 复制到当前目录
-- **subject**: "Copy translated report to current directory"
-- **description**: "将 /tmp/report-zh.html 复制到当前工作目录，命名为 report-zh.html。验证文件已成功复制。"
-- **activeForm**: "Copying translated file"
-- **addBlockedBy**: ["5"]
-
-### 任务 7: 在浏览器中打开
-- **subject**: "Open translated report in browser"
-- **description**: "使用系统默认浏览器打开当前目录的 report-zh.html 文件。macOS 使用 open 命令，Linux 使用 xdg-open 命令。"
-- **activeForm**: "Opening report in browser"
-- **addBlockedBy**: ["6"]
-
-## 步骤 2: 执行任务
-
-创建任务后，按以下顺序执行：
-
-### 执行任务 1: 检查报告文件
-
-使用 Bash 工具检查 `~/.claude/usage-data/report.html` 是否存在：
-
+运行提取脚本：
 ```bash
-ls -lh ~/.claude/usage-data/report.html
+python3 ~/.claude/skills/insights-zh/scripts/translate.py
 ```
 
-**如果文件不存在**：向用户报告错误："❌ 未找到 report.html 文件。请先运行 /insights 命令生成报告。"并将任务标记为失败。
+脚本会：
+1. ✅ 检查报告年龄（3 天内为新鲜）
+2. ✅ 提取 HTML 中的所有文本块
+3. ✅ 保存为 TSV 格式到 `/tmp/insights_blocks.tsv`
+4. ✅ 显示翻译提示
 
-**如果文件存在**：继续执行任务 2。
+输出示例：
+```
+============================================================
+Insights 报告翻译工具
+============================================================
 
-### 执行任务 2: 分析 HTML 文本块
+[1/4] 检查报告状态...
+✅ 报告新鲜（0 天前生成）
 
-1. 确认技能目录中的脚本可用。
-2. 使用 Bash 工具执行分析脚本：
+[2/4] 提取文本块...
+✅ 提取了 311 个文本块，共 15756 字符
+✅ 已保存到 /tmp/insights_blocks.tsv
 
-```bash
-python3 ~/.claude/skills/insights-zh/analyze_html.py ~/.claude/usage-data/report.html /tmp/insights-analysis.json 8
+[3/4] 等待翻译...
+请使用 Task 工具翻译 /tmp/insights_blocks.tsv
 ```
 
-3. 验证分析结果已生成：
-```bash
-ls -lh /tmp/insights-analysis.json
+### 步骤 2: 使用 Task 工具翻译
+
+**重要**：不要在当前会话中直接处理 TSV 文件，而是启动 Task 子代理：
+
+```
+请将 /tmp/insights_blocks.tsv 翻译为中文。
+
+TSV 格式说明：
+- 第一列：原文（保留不变）
+- 第二列：译文（请填写翻译）
+
+要求：
+1. 只翻译第二列（当前为空）
+2. 保持 TSV 格式不变
+3. 保留所有专有名词（Claude Code、GitHub、Python 等）
+4. 保留技术术语（TUI、API、HTML、CSS 等）
+5. 翻译中不要使用任何引号（中文或英文），用其他方式表达
+6. 完成后保存回原文件
 ```
 
-4. 使用 Read 工具读取分析结果，查看文本块数量和拆分方案。
+**为什么使用 Task 工具？**
+- 避免嵌套会话：原方案使用 `subprocess.run(['claude', 'prompt', ...])` 会导致错误
+  ```
+  Error: Claude Code cannot be launched inside another Claude Code session
+  ```
+- Task 工具启动独立子代理，完全隔离，无此限制
 
-### 执行任务 3: 创建翻译子任务
+### 步骤 3: 合并翻译结果
 
-1. 使用 Read 工具读取 `/tmp/insights-analysis.json` 文件。
-2. 根据 `chunks` 数组创建对应的翻译子任务记录。
-3. 准备翻译工作列表，每个 chunk 作为一个独立的翻译单元。
+翻译完成后，再次运行脚本：
+```bash
+python3 ~/.claude/skills/insights-zh/scripts/translate.py
+```
 
-### 执行任务 4: 执行翻译
+脚本会自动：
+1. ✅ 加载 TSV 中的翻译
+2. ✅ 使用 BeautifulSoup 合并到 HTML
+3. ✅ 保存为 `report-zh.html`
+4. ✅ 在浏览器中打开
 
-对于每个翻译子任务，按顺序执行：
+输出示例：
+```
+[4/4] 合并翻译...
+✅ 生成完成: ./report-zh.html
+   替换了 305 个文本节点
 
-1. **读取文本块**：从分析结果中获取当前 chunk 的所有文本块。
-2. **翻译文本**：使用大模型将英文文本翻译为中文。
+============================================================
+✅ 翻译完成！
+输出文件: /path/to/report-zh.html
+============================================================
+```
 
-**翻译规则**：
+## 翻译规则
 
-**必须保留不翻译的内容**:
-- HTML 标签和属性名（如 `class`、`id`、`data-*`、`style`、`href` 等）
-- HTML 属性值（如 `class="container"`、`id="header"` 等）
+**必须保留不翻译：**
+- HTML 标签和属性名（`class`、`id`、`data-*`、`style`、`href` 等）
+- HTML 属性值（`class="container"`、`id="header"` 等）
 - CSS 类名和 ID
 - 代码块中的技术术语和代码片段
+- 专有名词：Claude Code、GitHub、Twitter、Python、Rust 等
+- 技术术语：TUI、API、HTML、CSS、JSON、SSH 等
 
-**需要翻译的内容**:
+**需要翻译：**
 - 所有用户可见的文本内容
 - 页面标题、标题、段落文本
 - 按钮文本、链接文本（href 保留，链接文本翻译）
 - 表格内容、列表项文本
 
-**翻译原则**:
+**翻译原则：**
 - 保持 HTML 结构完全不变
 - 保持所有标签和属性完整
-- 保持缩进和格式
 - 只翻译文本节点内容
 - 确保翻译后的 HTML 语法正确
 - 技术术语保持一致性
+- **避免使用引号**：TSV 格式下，中文引号会破坏解析，用其他表达方式
 
-3. **保存翻译结果**：将翻译后的文本更新到 `/tmp/insights-analysis.json` 中对应 block 的 `translation` 字段。
-4. 串行处理所有 chunk，确保每个翻译完成后再处理下一个。
+## 错误处理
 
-### 执行任务 5: 整合翻译结果
+### 报告不存在
 
-1. 使用 Bash 工具执行合并脚本：
+如果 `~/.claude/usage-data/report.html` 不存在：
+1. 提示用户运行 `/insights` 命令生成报告
+2. 支持指定自定义路径：`--path <your-report.html>`
 
-```bash
-python3 ~/.claude/skills/insights-zh/merge_translations.py ~/.claude/usage-data/report.html /tmp/insights-analysis.json /tmp/report-zh.html
+### 报告过期
+
+如果报告超过 3 天未更新：
+1. 提示用户报告已过期及过期天数
+2. 建议运行 `/insights` 生成最新报告
+3. 可使用 `--force` 参数强制翻译过期报告
+
+### 嵌套会话错误
+
+如果看到错误：
+```
+Error: Claude Code cannot be launched inside another Claude Code session
 ```
 
-2. 验证合并后的文件已生成：
+**原因**：使用了 `subprocess.run(['claude', 'prompt', ...])`
+**解决**：使用 Task 工具启动独立子代理
+
+### TSV 格式问题
+
+如果 TSV 解析失败：
+1. 检查是否有未转义的制表符
+2. 检查是否有中文引号（应该避免使用）
+3. 确保每行都有两列：原文\t译文
+
+## 依赖问题
+
+脚本需要 `beautifulsoup4` 库：
 ```bash
-ls -lh /tmp/report-zh.html
+pip3 install beautifulsoup4
 ```
 
-3. 使用 Read 工具读取合并后的 HTML 文件的开头部分，验证格式正确。
-
-### 执行任务 6: 复制到当前目录
-
-使用 Bash 工具执行以下命令：
+## 可选参数
 
 ```bash
-cp /tmp/report-zh.html ./report-zh.html
-```
+# 翻译指定报告
+python3 ~/.claude/skills/insights-zh/scripts/translate.py --path <your-report.html>
 
-验证文件已成功复制到当前工作目录：
+# 指定输出文件
+python3 ~/.claude/skills/insights-zh/scripts/translate.py --output result.html
 
-```bash
-ls -lh ./report-zh.html
-```
-
-### 执行任务 7: 在浏览器中打开
-
-根据操作系统使用相应的命令：
-
-**macOS**:
-```bash
-open ./report-zh.html
-```
-
-**Linux**:
-```bash
-xdg-open ./report-zh.html
-```
-
-**Windows**:
-```bash
-start ./report-zh.html
+# 强制翻译过期报告（不推荐）
+python3 ~/.claude/skills/insights-zh/scripts/translate.py --force
 ```
 
 ## 完成提示
-
-所有任务完成后，向用户显示以下信息：
 
 ```
 ✅ Insights 中文报告生成完成！
@@ -191,67 +221,66 @@ start ./report-zh.html
 已在浏览器中打开翻译后的报告。
 ```
 
-## 故障排除
+## 架构说明
 
-### 如果找不到 HTML 文件
+### 新架构（推荐）
 
-如果任务 1 报告找不到 `report.html` 文件，请：
-
-1. 确认你已经运行过 `/insights` 命令
-2. 检查 `~/.claude/usage-data/` 目录：
-
-```bash
-ls -la ~/.claude/usage-data/
+**流程**：
+```
+检查报告 → 提取文本 → TSV 格式 → Task 子代理翻译 → 合并 HTML
 ```
 
-3. 如果文件不存在，请先运行 `/insights` 命令生成报告
+**优势**：
+- **避免嵌套会话**：Task 工具启动独立子代理
+- **避免 JSON 转义**：TSV 格式天然支持中文引号
+- **易于维护**：单一脚本，逻辑清晰
+- **进度可控**：每个步骤独立执行，可中断恢复
 
-### 如果分析脚本执行失败
+### 旧架构问题（已废弃）
 
-1. 确认 Python 3 已安装：
-```bash
-python3 --version
-```
+旧方案 `translate_report.py` 存在以下问题：
 
-2. 确认脚本路径正确
-3. 检查脚本权限：
-```bash
-chmod +x /path/to/analyze_html.py
-```
+1. **嵌套会话失败**：
+   ```python
+   subprocess.run(['claude', 'prompt', '--model', 'haiku', ...])
+   # Error: Claude Code cannot be launched inside another Claude Code session
+   ```
 
-### 如果翻译后 HTML 格式错误
+2. **JSON 转义问题**：
+   ```python
+   # 子代理生成的 JSON
+   {"translation": "例如，你多次用"算了，clear"这样的短语"}
+   # 中文引号导致解析失败
+   ```
 
-确保：
-- 所有 HTML 标签都完整保留
-- `<style>` 和 `<script>` 标签内容未被翻译
-- HTML 属性值未被修改
-- 可以在浏览器中打开翻译后的 HTML 文件验证
+3. **修复困难**：
+   - 多次尝试正则替换、行级修复均失败
+   - 最终改用 TSV 格式才解决
 
-### 如果浏览器无法打开
+## 详见
 
-1. 确认文件已成功复制到当前目录
-2. 手动在浏览器中打开 `./report-zh.html` 文件
-3. 检查文件路径是否正确
+- 技术细节记录：`~/memory/insights-translation-fix.md`
 
-## 技术说明
+## 索引问题修复
 
-### 文本块分析策略
+### 问题描述
 
-- 使用 HTMLParser 解析 HTML 结构
-- 提取所有非 script/style 标签内的文本
-- 记录每个文本块的上下文（所在标签层级）
-- 按字符长度均衡分配到 8-10 个块中
+早期版本的 translate.py 存在索引不一致问题：
 
-### 翻译策略
+1. **提取阶段**使用 `HTMLParser`，提取了 311 个文本块
+2. **合并阶段**使用 `BeautifulSoup.find_all(string=True)`，找到 315 个文本节点
+3. 两者的遍历顺序和节点计数不同，导致索引错位
 
-- 串行执行确保上下文一致性
-- 每个块独立翻译，避免长度限制
-- 保留技术术语的原始形式
-- 维护 HTML 结构完整性
+### 解决方案
 
-### 合并策略
+统一使用 BeautifulSoup 进行文本提取和合并：
 
-- 按文本长度降序替换，避免短文本被先替换
-- 精确匹配原始文本
-- 保留所有 HTML 标签和属性
-- 只替换文本节点内容
+- **提取阶段**：保存 `(NavigableString 对象, 文本)` 元组
+- **存储格式**：TSV 改为 `原文 | 译文` 两列
+- **合并阶段**：重新提取节点，按原文内容匹配翻译
+
+### 优势
+
+- 彻底解决索引不一致问题
+- 不依赖索引，使用内容匹配
+- 代码更简洁（不需要索引管理）
