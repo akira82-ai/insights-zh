@@ -64,14 +64,59 @@ def print_batch_content(rows, indices):
         print(f"{idx}. {text}")
 
 
+def update_translations(tsv_path, start_idx, translations):
+    """更新指定索引的翻译"""
+    rows = load_tsv(tsv_path)
+    updated_count = 0
+    for i, trans in enumerate(translations):
+        idx = start_idx + i
+        if idx < len(rows):
+            if len(rows[idx]) < 2:
+                rows[idx].append(trans)
+            else:
+                rows[idx][1] = trans
+            if trans.strip():  # 只记录非空翻译
+                updated_count += 1
+    save_tsv(tsv_path, rows)
+    return updated_count
+
+
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description='自动化批量翻译脚本')
+    parser.add_argument('--update', nargs='+', metavar='TRANSLATION',
+                        help='更新翻译：--update <start_idx> <trans1> <trans2> ...')
+    parser.add_argument('--quiet', action='store_true',
+                        help='静默模式，减少输出')
+
+    args = parser.parse_args()
+
     if not TSV_PATH.exists():
-        print(f"❌ TSV 文件不存在: {TSV_PATH}")
+        print(f"❌ TSV 文件不存在: {TSV_PATH}", file=sys.stderr)
         sys.exit(1)
 
-    print("=" * 60)
-    print("自动化批量翻译")
-    print("=" * 60)
+    # 处理 --update 参数
+    if args.update:
+        try:
+            start_idx = int(args.update[0])
+            translations = args.update[1:]
+            count = update_translations(TSV_PATH, start_idx, translations)
+            if not args.quiet:
+                print(f"✅ 已更新 {count} 行翻译")
+                # 显示更新后的进度
+                rows = load_tsv(TSV_PATH)
+                print_progress(rows)
+            return
+        except (ValueError, IndexError) as e:
+            print(f"❌ 参数错误: {e}", file=sys.stderr)
+            print(f"用法: --update <start_idx> <trans1> <trans2> ...", file=sys.stderr)
+            sys.exit(1)
+
+    if not args.quiet:
+        print("=" * 60)
+        print("自动化批量翻译")
+        print("=" * 60)
 
     # 加载 TSV
     rows = load_tsv(TSV_PATH)
@@ -80,21 +125,23 @@ def main():
     is_complete = print_progress(rows)
 
     if is_complete:
-        print("\n✅ 所有行已翻译完成！")
-        print(f"\n下一步：运行合并脚本")
-        print(f"  python3 ~/.claude/skills/insights-zh/scripts/translate.py")
+        if not args.quiet:
+            print("\n✅ 所有行已翻译完成！")
+            print(f"\n下一步：运行合并脚本")
+            print(f"  python3 ~/.claude/skills/insights-zh/scripts/translate.py")
         sys.exit(0)
 
     # 获取下一批
     indices = get_next_batch_indices(rows, BATCH_SIZE)
 
-    print_batch_content(rows, indices)
+    if not args.quiet:
+        print_batch_content(rows, indices)
 
-    # 输出提示
-    print(f"\n{'='*60}")
-    print("翻译要求")
-    print(f"{'='*60}")
-    print("""
+        # 输出提示
+        print(f"\n{'='*60}")
+        print("翻译要求")
+        print(f"{'='*60}")
+        print("""
 1. 保留专有名词：Claude Code、GitHub、Python、API、HTML、CSS
 2. 保留技术术语：TUI、JSON、SSH
 3. 不要使用引号（中文或英文）
@@ -106,8 +153,14 @@ def main():
 行3翻译
 ...
 
-完成后，我将更新 TSV 文件并继续下一批。
-    """)
+完成后，使用以下命令更新翻译：
+  python3 ~/.claude/skills/insights-zh/scripts/auto_batch.py --update {idx} <trans1> <trans2> ...
+或者直接编辑 TSV 文件：{tsv}
+        """.format(idx=indices[0] if indices else 0, tsv=TSV_PATH))
+    else:
+        # 静默模式：只显示索引和原文
+        for i in indices:
+            print(f"{i}\t{rows[i][0]}")
 
 
 if __name__ == '__main__':

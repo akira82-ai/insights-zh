@@ -209,6 +209,9 @@ def main():
     # 清理临时文件
     try:
         tsv_path.unlink()
+        progress_path = Path('/tmp/insights_progress.json')
+        if progress_path.exists():
+            progress_path.unlink()
         print(f"✅ 已清理临时文件: {tsv_path}")
     except Exception as e:
         print(f"⚠️  清理临时文件失败: {e}")

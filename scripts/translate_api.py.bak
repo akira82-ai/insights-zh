@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+一体化 Insights 报告翻译脚本（API 版本）
+自动检查报告年龄、提取文本、批量翻译并生成中文 HTML
+使用 Anthropic API 直接调用，避免嵌套会话问题
+"""
+import re
+import json
+import sys
+import os
+from pathlib import Path
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
+from bs4 import BeautifulSoup
+
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+
+
+# ==================== 配置 ====================
+DEFAULT_REPORT_PATH = Path.home() / '.claude/usage-data/report.html'
+MAX_REPORT_AGE_DAYS = 3  # 报告最大有效天数
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+
+
+# ==================== 报告检查 ====================
+def check_report_freshness(report_path, max_days=MAX_REPORT_AGE_DAYS):
+    """检查报告是否新鲜（max_days 天内）
+
+    Returns:
+        tuple: (is_fresh, message)
+            - is_fresh: None=文件不存在, True=新鲜, False=过期
+            - message: 描述信息
+    """
+    report_path = Path(report_path)
+
+    if not report_path.exists():
+        return None, f"报告文件不存在: {report_path}"
+
+    mtime = report_path.stat().st_mtime
+    file_date = datetime.fromtimestamp(mtime)
+    age_days = (datetime.now() - file_date).days
+
+    if age_days > max_days:
+        return False, f"报告已过期 {age_days - max_days} 天（生成于 {file_date.strftime('%Y-%m-%d')}）"
+
+    return True, f"报告新鲜（{age_days} 天前生成）"
+
+
+# ==================== HTML 解析 ====================
+class TextBlockExtractor(HTMLParser):
+    """提取 HTML 中的文本块，保留结构信息"""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = []
+        self.in_script = False
+        self.in_style = False
+        self.tag_stack = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tag_stack.append(tag)
+        if tag == 'script':
+            self.in_script = True
+        elif tag == 'style':
+            self.in_style = True
+
+    def handle_endtag(self, tag):
+        if self.tag_stack and self.tag_stack[-1] == tag:
+            self.tag_stack.pop()
+        if tag == 'script':
+            self.in_script = False
+        elif tag == 'style':
+            self.in_style = False
+
+    def handle_data(self, data):
+        # 跳过 script 和 style 标签内的内容
+        if self.in_script or self.in_style:
+            return
+
+        # 跳过纯空白
+        text = data.strip()
+        if not text:
+            return
+
+        # 记录文本块
+        self.blocks.append({
+            'text': text,
+            'context': ' > '.join(self.tag_stack[-3:]) if self.tag_stack else 'root',
+            'length': len(text)
+        })
+
+
+def extract_text_blocks(html_path):
+    """从 HTML 文件提取所有文本块"""
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    extractor = TextBlockExtractor()
+    extractor.feed(html_content)
+
+    return extractor.blocks
+
+
+# ==================== 翻译功能 ====================
+def parse_batch_translation(content, expected_count):
+    """解析批量翻译结果"""
+    translations = []
+    lines = content.strip().split('\n')
+
+    for line in lines:
+        # 匹配多种序号格式: 1. text, 1) text, 1、text
+        match = re.match(r'^\d+[\.\)、]\s*(.+)$', line.strip())
+        if match:
+            translations.append(match.group(1))
+
+    if len(translations) != expected_count:
+        return []
+
+    return translations
+
+
+def translate_blocks_batch(blocks, batch_size=10, api_key=None):
+    """批量翻译文本块（使用 Anthropic API）"""
+    if not HAS_ANTHROPIC:
+        raise ImportError("需要安装 anthropic 库: pip3 install anthropic")
+
+    if not api_key:
+        raise ValueError("需要设置 ANTHROPIC_API_KEY 环境变量")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    total = len(blocks)
+    translated = []
+
+    for i in range(0, total, batch_size):
+        batch = blocks[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (total + batch_size - 1) // batch_size
+
+        print(f"翻译批次 {batch_num}/{total_batches} ({len(batch)} 个文本块)...")
+
+        # 构建批量翻译请求
+        batch_prompt = "请将以下文本段分别翻译为中文。只翻译用户可见的内容，保留所有 HTML 标签、属性名、CSS 类名、代码和技术术语。\n\n"
+        for idx, block in enumerate(batch, 1):
+            batch_prompt += f"{idx}. {block['text']}\n"
+        batch_prompt += "\n请按相同格式输出翻译结果（序号. 翻译文本）："
+
+        try:
+            message = client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": batch_prompt
+                }]
+            )
+
+            content = message.content[0].text
+            translations = parse_batch_translation(content, len(batch))
+
+            if translations:
+                for idx, block in enumerate(batch):
+                    block['translation'] = translations[idx]
+                print(f"  批量翻译成功")
+            else:
+                print(f"  批量翻译解析失败，跳过此批次")
+                for block in batch:
+                    block['translation'] = None
+
+        except Exception as e:
+            print(f"  API 调用失败: {e}")
+            for block in batch:
+                block['translation'] = None
+
+        translated.extend(batch)
+
+    return translated
+
+
+# ==================== HTML 生成 ====================
+def generate_chinese_html(html_path, blocks, output_path):
+    """生成中文 HTML"""
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text_nodes = list(soup.find_all(string=True))
+
+    # 过滤需要翻译的节点
+    translatable_nodes = []
+    for node in text_nodes:
+        parent = node.parent
+        in_code = parent and parent.name in ['script', 'style']
+        text = str(node).strip()
+        if not in_code and text:
+            translatable_nodes.append(node)
+
+    # 按位置替换
+    replace_count = 0
+    for idx, node in enumerate(translatable_nodes):
+        if idx < len(blocks) and blocks[idx].get('translation'):
+            original_text = str(node).strip()
+            if original_text == blocks[idx]['text']:
+                node.replace_with(blocks[idx]['translation'])
+                replace_count += 1
+
+    # 保存结果
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(str(soup))
+
+    print(f"生成完成: {output_path}")
+    print(f"  替换了 {replace_count}/{len(blocks)} 个文本节点")
+    return output_path
+
+
+# ==================== 主流程 ====================
+def main():
+    """主流程"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='一体化 Insights 报告翻译工具（API 版本）')
+    parser.add_argument('--path', type=str, help='源 HTML 报告路径')
+    parser.add_argument('--output', type=str, default='./report-zh.html', help='输出 HTML 路径')
+    parser.add_argument('--batch-size', type=int, default=10, help='每批翻译的文本块数量')
+    parser.add_argument('--force', action='store_true', help='忽略报告过期检查')
+    parser.add_argument('--api-key', type=str, help='Anthropic API Key（默认使用 ANTHROPIC_API_KEY 环境变量）')
+
+    args = parser.parse_args()
+
+    report_path = Path(args.path) if args.path else DEFAULT_REPORT_PATH
+    output_path = Path(args.output)
+    api_key = args.api_key or ANTHROPIC_API_KEY
+
+    print("=" * 60)
+    print("Insights 报告翻译工具（API 版本）")
+    print("=" * 60)
+
+    # 检查依赖
+    if not HAS_ANTHROPIC:
+        print("\n❌ 缺少依赖库")
+        print("请运行: pip3 install anthropic")
+        return 1
+
+    if not api_key:
+        print("\n❌ 缺少 API Key")
+        print("请设置 ANTHROPIC_API_KEY 环境变量或使用 --api-key 参数")
+        return 1
+
+    # 检查报告
+    print("\n[1/4] 检查报告状态...")
+    is_fresh, msg = check_report_freshness(report_path)
+
+    if is_fresh is None:
+        print(f"❌ {msg}")
+        print("\n请先运行 /insights 命令生成报告")
+        return 1
+    elif not is_fresh and not args.force:
+        print(f"⚠️  {msg}）")
+        print("\n请运行 /insights 生成最新报告后再翻译")
+        print("或使用 --force 参数强制翻译过期报告")
+        return 1
+    else:
+        print(f"✅ {msg}")
+
+    # 提取文本块
+    print(f"\n[2/4] 提取文本块...")
+    blocks = extract_text_blocks(report_path)
+    total_chars = sum(b['length'] for b in blocks)
+    print(f"✅ 提取了 {len(blocks)} 个文本块，共 {total_chars} 字符")
+
+    # 批量翻译
+    print(f"\n[3/4] 开始批量翻译...")
+    translated_blocks = translate_blocks_batch(blocks, batch_size=args.batch_size, api_key=api_key)
+
+    # 生成中文 HTML
+    print(f"\n[4/4] 生成中文 HTML...")
+    generate_chinese_html(report_path, translated_blocks, output_path)
+
+    print("\n" + "=" * 60)
+    print("✅ 翻译完成！")
+    print(f"输出文件: {output_path.absolute()}")
+    print("=" * 60)
+
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n\n⚠️  用户中断")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ 错误: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

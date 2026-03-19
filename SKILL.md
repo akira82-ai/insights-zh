@@ -99,54 +99,51 @@ Insights 报告翻译工具
 请使用 Task 工具翻译 /tmp/insights_blocks.tsv
 ```
 
-### 步骤 2: 使用 Task 工具翻译
+### 步骤 2: 批量翻译（显示进度）
 
-**重要**：不要在当前会话中直接处理 TSV 文件，而是启动 Task 子代理：
+使用批量翻译模式，在主会话中实时显示进度：
 
-```
-请将 /tmp/insights_blocks.tsv 翻译为中文。
+1. **启动批量翻译**：
+   ```bash
+   python3 ~/.claude/skills/insights-zh/scripts/auto_batch.py
+   ```
 
-TSV 格式说明：
-- 第一列：原文（保留不变）
-- 第二列：译文（请填写翻译）
+2. **查看进度和待翻译内容**：
+   输出示例：
+   ```
+   [██████░░░] 50.3% (140/309)
 
-**关键要求（必须遵守）：**
-1. 翻译每一行的第二列，不允许跳过任何一行
-2. 完成后必须使用 Write 工具将结果保存回 /tmp/insights_blocks.tsv
-3. 确保保存的文件包含所有翻译内容，不能只保存部分
-4. 保存前请验证：文件总行数应该与原始文件一致
+   待翻译批次：15 行
+   ═══════════════════════════════════════════════════════════
 
-翻译要求：
-1. 只翻译第二列（当前为空）
-2. 保持 TSV 格式不变
-3. 保留所有专有名词（Claude Code、GitHub、Python 等）
-4. 保留技术术语（TUI、API、HTML、CSS 等）
-5. 翻译中不要使用任何引号（中文或英文），用其他方式表达
-6. 翻译所有内容，包括标题、按钮、链接文本、表格内容等
-7. 日期格式保留（如 "2026-02-05 to 2026-02-06"）
-8. 完成后保存回原文件
+   1. Conversation Insights
+   2. Dashboard Overview
+   3. Time Period
+   ...
+   ```
 
-完成后，请确认已保存的文件包含完整的翻译结果。
-```
+3. **提供翻译**：
+   - 翻译显示的 15 行内容
+   - 每行一个翻译
+   - 保持专有名词和技术术语不变
 
-**可选：监控实时进度**
+4. **更新 TSV 文件**：
+   使用以下命令更新翻译：
+   ```bash
+   python3 ~/.claude/skills/insights-zh/scripts/auto_batch.py --update <start_idx> <trans1> <trans2> ...
+   ```
 
-在另一个终端运行以下命令查看实时进度：
-```bash
-python3 ~/.claude/skills/insights-zh/scripts/monitor_progress.py
-```
+   或者直接编辑 TSV 文件：
+   ```bash
+   open /tmp/insights_blocks.tsv
+   ```
 
-进度显示格式：
-```
-[==========>           ] 50.5% (157/311)
-```
+5. **重复步骤 1-4**，直到显示：
+   ```
+   ✅ 所有行已翻译完成！
+   ```
 
-**为什么使用 Task 工具？**
-- 避免嵌套会话：原方案使用 `subprocess.run(['claude', 'prompt', ...])` 会导致错误
-  ```
-  Error: Claude Code cannot be launched inside another Claude Code session
-  ```
-- Task 工具启动独立子代理，完全隔离，无此限制
+6. **继续到步骤 3**：合并翻译结果
 
 ### 步骤 3: 合并翻译结果
 

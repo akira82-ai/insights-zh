@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+一体化 Insights 报告翻译脚本（会话内版本）
+提取文本块，输出为 JSON 格式供会话内翻译使用
+"""
+import json
+import sys
+from pathlib import Path
+from datetime import datetime
+from html.parser import HTMLParser
+from bs4 import BeautifulSoup
+
+
+# ==================== 配置 ====================
+DEFAULT_REPORT_PATH = Path.home() / '.claude/usage-data/report.html'
+MAX_REPORT_AGE_DAYS = 3
+
+
+# ==================== 报告检查 ====================
+def check_report_freshness(report_path, max_days=MAX_REPORT_AGE_DAYS):
+    """检查报告是否新鲜"""
+    report_path = Path(report_path)
+
+    if not report_path.exists():
+        return None, f"报告文件不存在: {report_path}"
+
+    mtime = report_path.stat().st_mtime
+    file_date = datetime.fromtimestamp(mtime)
+    age_days = (datetime.now() - file_date).days
+
+    if age_days > max_days:
+        return False, f"报告已过期 {age_days - max_days} 天（生成于 {file_date.strftime('%Y-%m-%d')}）"
+
+    return True, f"报告新鲜（{age_days} 天前生成）"
+
+
+# ==================== HTML 解析 ====================
+class TextBlockExtractor(HTMLParser):
+    """提取 HTML 中的文本块"""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = []
+        self.in_script = False
+        self.in_style = False
+        self.tag_stack = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tag_stack.append(tag)
+        if tag == 'script':
+            self.in_script = True
+        elif tag == 'style':
+            self.in_style = True
+
+    def handle_endtag(self, tag):
+        if self.tag_stack and self.tag_stack[-1] == tag:
+            self.tag_stack.pop()
+        if tag == 'script':
+            self.in_script = False
+        elif tag == 'style':
+            self.in_style = False
+
+    def handle_data(self, data):
+        if self.in_script or self.in_style:
+            return
+
+        text = data.strip()
+        if not text:
+            return
+
+        self.blocks.append({
+            'text': text,
+            'context': ' > '.join(self.tag_stack[-3:]) if self.tag_stack else 'root'
+        })
+
+
+def extract_text_blocks(html_path):
+    """从 HTML 文件提取所有文本块"""
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    extractor = TextBlockExtractor()
+    extractor.feed(html_content)
+
+    return extractor.blocks
+
+
+# ==================== 翻译合并 ====================
+def merge_translations(html_path, translations_json, output_path):
+    """合并翻译结果到 HTML"""
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # 创建文本映射
+    text_map = {item['original']: item['translation'] for item in translations_json}
+
+    # 查找并替换文本节点
+    replace_count = 0
+    for node in soup.find_all(string=True):
+        parent = node.parent
+        if parent and parent.name in ['script', 'style']:
+            continue
+
+        text = str(node).strip()
+        if text and text in text_map:
+            node.replace_with(text_map[text])
+            replace_count += 1
+
+    # 保存结果
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(str(soup))
+
+    print(f"生成完成: {output_path}")
+    print(f"  替换了 {replace_count} 个文本节点")
+    return output_path
+
+
+# ==================== 主流程 ====================
+def main():
+    """主流程"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Insights 报告文本提取工具')
+    parser.add_argument('--path', type=str, help='源 HTML 报告路径')
+    parser.add_argument('--output', type=str, help='输出 JSON 路径')
+
+    args = parser.parse_args()
+
+    report_path = Path(args.path) if args.path else DEFAULT_REPORT_PATH
+
+    # 检查报告
+    is_fresh, msg = check_report_freshness(report_path)
+
+    if is_fresh is None:
+        print(f"❌ {msg}")
+        return 1
+    elif not is_fresh:
+        print(f"⚠️  {msg}")
+        return 1
+
+    # 提取文本块
+    blocks = extract_text_blocks(report_path)
+
+    # 输出 JSON
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(blocks, f, ensure_ascii=False, indent=2)
+        print(f"✅ 提取了 {len(blocks)} 个文本块")
+        print(f"输出文件: {output_path}")
+    else:
+        print(json.dumps(blocks, ensure_ascii=False, indent=2))
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
